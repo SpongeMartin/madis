@@ -31,10 +31,8 @@ int main(int argc, char *argv[]){
     }
 
     while(status == 0){
-        
         printf("Enter message: ");
         fgets(buffer, 4096, stdin);
-        status = getsockopt(socket_fd, SOL_SOCKET, SO_ERROR, &error, &len) ;
         if(send(client_fd, buffer, strlen(buffer), 0) < 0){
             printf("Send failed\n");
         } else {

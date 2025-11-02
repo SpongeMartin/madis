@@ -3,6 +3,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <sys/epoll.h>
+#include <fcntl.h>
 
 #define PORT 8080
 
@@ -13,20 +15,31 @@ typedef struct {
     size_t value_len;
 } CacheEntry;
 
+typedef struct {
+    size_t fd;
+    size_t payload_len;
+    char* buffer;
+
+} Client;
+
+
 int main(int argc, char *argv[]) {
     // This is a TCP server! args should be: ./server <local> <port> where local means if server should run locally or remotely
 
-    int server_door_fd, new_socket, valread;
+    int server_door_fd, epoll_fd, client_fd;
     struct sockaddr_in address;
+    struct epoll_event event, events[4096];
     int opt = 1;
     socklen_t addrlen = sizeof(address);
-    char buffer[4096] = {0};
+    char* buffer;
 
+    // Initialize server socket
     if ((server_door_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         perror("Socket failed");
         exit(EXIT_FAILURE);
     }
 
+    // Attach socket to port
     if (setsockopt(server_door_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))){
         perror("Setsockopt failed");
         exit(EXIT_FAILURE);
@@ -44,22 +57,59 @@ int main(int argc, char *argv[]) {
     listen(server_door_fd, 3);
     printf("Listening on port %d\n", PORT);
 
-    while(1) {
-        if (new_socket <= 0) {
-            if((new_socket = accept(server_door_fd, (struct sockaddr*)&address, &addrlen)) < 0) {
-                perror("Connection failed\n");
-                continue;
-            } else {
-                printf("Connection accepted!\n");
-            }
-        }
-        printf("Waiting for messages...\n");
-        valread = read(new_socket, buffer, 1023);
-        printf("Recieved message: %s", buffer);
+    int flags = fcntl(server_door_fd, F_GETFL, 0);
+    fcntl(server_door_fd, F_SETFL, flags | SOCK_NONBLOCK); // Make socket non-blocking
+
+    // Set up epoll
+    epoll_fd = epoll_create1(0);
+    if (epoll_fd == -1) {
+        perror("epoll_create1 failed");
+        exit(EXIT_FAILURE);
     }
 
-    close(new_socket);
+    //memset(&event, 0, sizeof(event));
+    event.events = EPOLLIN;
+    event.data.fd = server_door_fd;
+
+    if(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_door_fd, &event) == -1) {
+		perror("Failed to add file descriptor to epoll\n");
+		close(epoll_fd);
+		exit(EXIT_FAILURE);
+	}
+
+    while(1) {
+        int n = epoll_wait(epoll_fd, events, 1023, -1);
+        for (int i = 0; i < n; i++) {
+            int fd = events[i].data.fd;
+            if(fd == server_door_fd) {
+                client_fd = accept(server_door_fd, (struct sockaddr*)&address, &addrlen);
+                int flags = fcntl(client_fd, F_GETFL, 0);
+                fcntl(client_fd, F_SETFL, flags | SOCK_NONBLOCK);
+                event.events = EPOLLIN;
+                event.data.fd = client_fd;
+                if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event) == -1) {
+                    perror("Failed to add new socket to epoll\n");
+                    break;
+                }
+                printf("New connection accepted by %i\n", fd);
+            } else {
+                ssize_t msg_length = recv(fd, buffer, 1023, 0);
+                if (msg_length <= 0) {
+                    printf("Client %i has died.\n", fd);
+                    close(fd);
+                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+                    clear(buffer);
+                    break;
+                }
+                buffer[msg_length] = '\0';
+                printf("Recieved message from %i: %s", fd, buffer);
+            }
+        }
+    }
+
 
     close(server_door_fd);
     return 0;
 }
+
+
