@@ -5,33 +5,49 @@
 #include <arpa/inet.h>
 #include <sys/epoll.h>
 #include <fcntl.h>
+#include "hashtable.c"
 
 #define PORT 8080
+#define MAX_CONNECTIONS 50 // Could be cool to allow only SHA connections.
 
 typedef struct {
     char *key;
     char *value;
     size_t value_size;
     size_t value_len;
-} CacheEntry;
+} Payload;
 
 typedef struct {
     size_t fd;
-    size_t payload_len;
-    char* buffer;
-
+    char *buffer;
 } Client;
+
+int epoll_fd;
+
+void handleMessage(Client *client) {
+    ssize_t msg_length = recv(client->fd, client->buffer, sizeof(client->buffer), 0);
+    if (msg_length <= 0) {
+        printf("Client %li has died.\n", client->fd);
+        close(client->fd);
+        epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client->fd, NULL);
+        free(client->buffer);
+        return;
+    }
+    client->buffer[msg_length] = '\0';
+    printf("Recieved message from %li: %s", client->fd, client->buffer);
+}
 
 
 int main(int argc, char *argv[]) {
     // This is a TCP server! args should be: ./server <local> <port> where local means if server should run locally or remotely
 
-    int server_door_fd, epoll_fd, client_fd;
+    int server_door_fd;
     struct sockaddr_in address;
     struct epoll_event event, events[4096];
     int opt = 1;
     socklen_t addrlen = sizeof(address);
-    char* buffer;
+    HashTable *ht_cache = constructHashTable(100000);
+    HashTable *ht_clients = constructHashTable(MAX_CONNECTIONS);
 
     // Initialize server socket
     if ((server_door_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
@@ -82,7 +98,7 @@ int main(int argc, char *argv[]) {
         for (int i = 0; i < n; i++) {
             int fd = events[i].data.fd;
             if(fd == server_door_fd) {
-                client_fd = accept(server_door_fd, (struct sockaddr*)&address, &addrlen);
+                int client_fd = accept(server_door_fd, (struct sockaddr*)&address, &addrlen);
                 int flags = fcntl(client_fd, F_GETFL, 0);
                 fcntl(client_fd, F_SETFL, flags | SOCK_NONBLOCK);
                 event.events = EPOLLIN;
@@ -91,25 +107,16 @@ int main(int argc, char *argv[]) {
                     perror("Failed to add new socket to epoll\n");
                     break;
                 }
-                printf("New connection accepted by %i\n", fd);
+                Client *client = malloc(sizeof(Client));
+                client->fd = client_fd;
+                addElement(ht_clients, (char *)fd, client);
+                printf("New connection accepted %i\n", client_fd);
             } else {
-                ssize_t msg_length = recv(fd, buffer, 1023, 0);
-                if (msg_length <= 0) {
-                    printf("Client %i has died.\n", fd);
-                    close(fd);
-                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
-                    clear(buffer);
-                    break;
-                }
-                buffer[msg_length] = '\0';
-                printf("Recieved message from %i: %s", fd, buffer);
+                handleMessage((Client *)findElement(ht_clients, (char *)fd));
             }
         }
     }
 
-
     close(server_door_fd);
     return 0;
 }
-
-
