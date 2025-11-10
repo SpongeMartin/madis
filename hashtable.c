@@ -27,7 +27,6 @@ void *findElement(HashTable *ht, char *key){
 
 void addElement(HashTable *ht, char *key, void *value) {
     unsigned long index = hash((unsigned char *)key) % ht->size;
-    printf("Added to %li\n", index);
     Entry *curr = ht->table[index];
     Entry *prev = NULL;
 

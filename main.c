@@ -6,40 +6,92 @@
 #include <sys/epoll.h>
 #include <fcntl.h>
 #include "hashtable.c"
+#include "auxiliary.c"
 
 #define PORT 8080
 #define MAX_CONNECTIONS 50 // Could be cool to allow only SHA connections.
+#define BUFFER_SIZE 1024
+#define KEY_SIZE 256
+#define OP_SIZE 16
+
+typedef enum {
+    CMD_POST,
+    CMD_DEL,
+    CMD_GET,
+    CMD_UNKNOWN
+} Command;
 
 typedef struct {
-    char *key;
-    char *value;
-    size_t value_size;
-    size_t value_len;
-} Payload;
-
-typedef struct {
-    size_t fd;
+    int fd;
     char *buffer;
+    char *key;
+    char *op;
 } Client;
 
 int epoll_fd;
 
-void handleMessage(Client *client) {
+Command parseCommand(char *op) {
+    if (strcmp(op, "POST\n") == 0) return CMD_POST;
+    if (strcmp(op, "DEL\n") == 0)  return CMD_DEL;
+    if (strcmp(op, "GET\n") == 0)  return CMD_GET;
+    return CMD_UNKNOWN;
+}
+
+void handleMessage(Client *client, HashTable *ht) {
     ssize_t msg_length = recv(client->fd, client->buffer, sizeof(client->buffer), 0);
+    printf("Message: %s", client->buffer);
     if (msg_length <= 0) {
-        printf("Client %li has died.\n", client->fd);
+        printf("Client %i has died.\n", client->fd);
         close(client->fd);
         epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client->fd, NULL);
         free(client->buffer);
         return;
     }
+
     client->buffer[msg_length] = '\0';
-    printf("Recieved message from %li: %s", client->fd, client->buffer);
+
+    if (client->op[0] == '\0'){
+        strcpy(client->op, client->buffer);
+        memset(client->buffer, 0, BUFFER_SIZE);
+        return;
+    }
+
+    
+    if (client->key[0] == '\0') {
+        strcpy(client->key, client->buffer);
+        memset(client->buffer, 0, BUFFER_SIZE);
+        if(strcmp(client->op,"POST\n") == 0) return;
+    }
+
+    switch (parseCommand(client->op)){
+        case CMD_POST:
+            addElement(ht, client->key, strdup(client->buffer));
+            printf("CMD_POST - Element added!\n");
+            break;
+
+        case CMD_DEL:
+            removeElement(ht, client->key);
+            printf("CMD_DEL - Element deleted!\n");
+            break;
+
+        case CMD_GET:
+            char* message = (char*)findElement(ht, client->key);
+            printf("CMD_GET - Found element: %s", message);
+            break;
+        
+        default:
+            printf("Wrong method sent by %i\n", client->fd);
+            break;
+    }
+    
+    memset(client->buffer, 0, BUFFER_SIZE);
+    memset(client->key, 0, KEY_SIZE);
+    memset(client->op, 0, OP_SIZE);
 }
 
 
 int main(int argc, char *argv[]) {
-    // This is a TCP server! args should be: ./server <local> <port> where local means if server should run locally or remotely
+    // This is a server! args should be: ./server <local> <port> where local means if server should run locally or remotely
 
     int server_door_fd;
     struct sockaddr_in address;
@@ -59,7 +111,7 @@ int main(int argc, char *argv[]) {
     if (setsockopt(server_door_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))){
         perror("Setsockopt failed");
         exit(EXIT_FAILURE);
-    } // IPPROTO_TCP  for tcp
+    } // IPPROTO_TCP for tcp
 
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
@@ -109,10 +161,17 @@ int main(int argc, char *argv[]) {
                 }
                 Client *client = malloc(sizeof(Client));
                 client->fd = client_fd;
-                addElement(ht_clients, (char *)fd, client);
+                client->buffer = malloc(BUFFER_SIZE);
+                client->key = malloc(KEY_SIZE);
+                client->op = malloc(OP_SIZE);
+                char stringified_client_fd[32];
+                itoa(client_fd, stringified_client_fd);
+                addElement(ht_clients, stringified_client_fd, client);
                 printf("New connection accepted %i\n", client_fd);
             } else {
-                handleMessage((Client *)findElement(ht_clients, (char *)fd));
+                char stringified_fd[32];
+                itoa(fd, stringified_fd);
+                handleMessage((Client *)findElement(ht_clients,stringified_fd), ht_cache);
             }
         }
     }
